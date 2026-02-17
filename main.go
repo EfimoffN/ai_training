@@ -36,7 +36,7 @@ func main() {
 	}
 
 	reqBody := request{
-		Model:     "claude-sonnet-4-5-20250929",
+		Model:     "claude-haiku-4-5-20251001",
 		MaxTokens: 256,
 		Messages: []message{
 			{Role: "user", Content: "Привет! Расскажи о себе в одном предложении."},
