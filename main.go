@@ -13,9 +13,11 @@ import (
 const apiURL = "https://api.anthropic.com/v1/messages"
 
 type request struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	Messages  []message `json:"messages"`
+	Model         string    `json:"model"`
+	MaxTokens     int       `json:"max_tokens"`
+	Messages      []message `json:"messages"`
+	System        string    `json:"system,omitempty"`
+	StopSequences []string  `json:"stop_sequences,omitempty"`
 }
 
 type message struct {
@@ -27,6 +29,7 @@ type response struct {
 	Content []struct {
 		Text string `json:"text"`
 	} `json:"content"`
+	StopReason string `json:"stop_reason"`
 }
 
 func main() {
@@ -35,14 +38,34 @@ func main() {
 		log.Fatal("ANTHROPIC_API_KEY is not set")
 	}
 
-	reqBody := request{
+	prompt := "Расскажи о языке программирования Go."
+
+	// === Запрос 1: без ограничений ===
+	fmt.Println("=== БЕЗ ОГРАНИЧЕНИЙ ===")
+	resp1 := sendRequest(apiKey, request{
 		Model:     "claude-haiku-4-5-20251001",
 		MaxTokens: 256,
-		Messages: []message{
-			{Role: "user", Content: "Привет! Расскажи о себе в одном предложении."},
-		},
-	}
+		Messages:  []message{{Role: "user", Content: prompt}},
+	})
+	printResponse(resp1)
 
+	// === Запрос 2: с ограничениями ===
+	fmt.Println("\n=== С ОГРАНИЧЕНИЯМИ ===")
+	resp2 := sendRequest(apiKey, request{
+		Model:     "claude-haiku-4-5-20251001",
+		MaxTokens: 60, // жёсткий лимит токенов
+		System: "Отвечай строго в формате:\n" +
+			"ЯЗЫК: <название>\n" +
+			"ПЛЮСЫ: <3 пункта через запятую>\n" +
+			"МИНУСЫ: <3 пункта через запятую>\n" +
+			"END",
+		StopSequences: []string{"END"}, // остановка при встрече "END"
+		Messages:      []message{{Role: "user", Content: prompt}},
+	})
+	printResponse(resp2)
+}
+
+func sendRequest(apiKey string, reqBody request) response {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		log.Fatal(err)
@@ -77,7 +100,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	for _, block := range result.Content {
+	return result
+}
+
+func printResponse(resp response) {
+	for _, block := range resp.Content {
 		fmt.Println(block.Text)
 	}
+	fmt.Printf("\n[stop_reason: %s]\n", resp.StopReason)
 }
