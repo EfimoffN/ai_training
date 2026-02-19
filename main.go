@@ -14,10 +14,10 @@ import (
 const apiURL = "https://api.anthropic.com/v1/messages"
 
 type request struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	Messages  []message `json:"messages"`
-	System    string    `json:"system,omitempty"`
+	Model       string    `json:"model"`
+	MaxTokens   int       `json:"max_tokens"`
+	Messages    []message `json:"messages"`
+	Temperature float64   `json:"temperature"`
 }
 
 type message struct {
@@ -39,76 +39,35 @@ func main() {
 		log.Fatal("ANTHROPIC_API_KEY is not set")
 	}
 
-	task := "Кирпич стоит 500 рублей и ещё пол кирпича. Сколько стоит кирпич?"
+	// Один и тот же промпт — креативная задача, чтобы разница была заметнее
+	prompt := "Придумай короткую метафору (2-3 предложения): что такое программирование?"
 
-	// === Способ 1: прямой ответ ===
-	fmt.Println("==================================================")
-	fmt.Println("СПОСОБ 1: Прямой ответ")
-	fmt.Println("==================================================")
-	resp1 := sendRequest(request{
-		Model:     "claude-haiku-4-5-20251001",
-		MaxTokens: 512,
-		Messages:  []message{{Role: "user", Content: task}},
-	})
-	printResponse(resp1)
+	temperatures := []float64{0, 0.7, 1.0}
 
-	// === Способ 2: пошаговое рассуждение ===
-	fmt.Println("\n==================================================")
-	fmt.Println("СПОСОБ 2: Пошаговое рассуждение")
-	fmt.Println("==================================================")
-	resp2 := sendRequest(request{
-		Model:     "claude-haiku-4-5-20251001",
-		MaxTokens: 1024,
-		Messages: []message{{
-			Role:    "user",
-			Content: task + "\n\nРешай пошагово. На каждом шаге объясни логику.",
-		}},
-	})
-	printResponse(resp2)
+	labels := map[float64]string{
+		0:   "ТОЧНЫЙ (temperature = 0)",
+		0.7: "СБАЛАНСИРОВАННЫЙ (temperature = 0.7)",
+		1.0: "КРЕАТИВНЫЙ (temperature = 1.0)",
+	}
 
-	// === Способ 3: сначала составить промпт, потом решить ===
-	fmt.Println("\n==================================================")
-	fmt.Println("СПОСОБ 3: Модель сама пишет промпт, затем решает")
-	fmt.Println("==================================================")
+	// Для каждой температуры делаем 3 запроса, чтобы оценить разнообразие
+	for _, temp := range temperatures {
+		fmt.Println("==================================================")
+		fmt.Printf("  %s\n", labels[temp])
+		fmt.Println("==================================================")
 
-	// Шаг 3а: просим модель составить идеальный промпт
-	fmt.Println("--- Шаг А: генерация промпта ---")
-	metaResp := sendRequest(request{
-		Model:     "claude-haiku-4-5-20251001",
-		MaxTokens: 512,
-		System: "Ты — эксперт по промпт-инженерии. " +
-			"Составь идеальный промпт для решения задачи. " +
-			"Верни ТОЛЬКО текст промпта, без пояснений.",
-		Messages: []message{{Role: "user", Content: task}},
-	})
-	generatedPrompt := extractText(metaResp)
-	fmt.Println(generatedPrompt)
-
-	// Шаг 3б: решаем задачу сгенерированным промптом
-	fmt.Println("\n--- Шаг Б: решение по сгенерированному промпту ---")
-	resp3 := sendRequest(request{
-		Model:     "claude-haiku-4-5-20251001",
-		MaxTokens: 1024,
-		Messages:  []message{{Role: "user", Content: generatedPrompt}},
-	})
-	printResponse(resp3)
-
-	// === Способ 4: группа экспертов ===
-	fmt.Println("\n==================================================")
-	fmt.Println("СПОСОБ 4: Группа экспертов")
-	fmt.Println("==================================================")
-	resp4 := sendRequest(request{
-		Model:     "claude-haiku-4-5-20251001",
-		MaxTokens: 1500,
-		System: "В обсуждении участвуют три эксперта:\n\n" +
-			"АНАЛИТИК — формализует условие, выделяет ключевые данные и ограничения.\n" +
-			"ИНЖЕНЕР — предлагает конкретное решение и проверяет его на примере.\n" +
-			"КРИТИК — ищет ошибки в решении и проверяет граничные случаи.\n\n" +
-			"Каждый эксперт высказывается по очереди. " +
-			"В конце дайте общий согласованный ответ.",
-		Messages: []message{{Role: "user", Content: task}},
-	})
-	printResponse(resp4)
+		for i := 1; i <= 3; i++ {
+			fmt.Printf("\n--- Попытка %d ---\n", i)
+			resp := sendRequest(request{
+				Model:       "claude-haiku-4-5-20251001",
+				MaxTokens:   200,
+				Temperature: temp,
+				Messages:    []message{{Role: "user", Content: prompt}},
+			})
+			printResponse(resp)
+		}
+		fmt.Println()
+	}
 }
 
 func sendRequest(reqBody request) response {
