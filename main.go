@@ -9,15 +9,15 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 const apiURL = "https://api.anthropic.com/v1/messages"
 
 type request struct {
-	Model       string    `json:"model"`
-	MaxTokens   int       `json:"max_tokens"`
-	Messages    []message `json:"messages"`
-	Temperature float64   `json:"temperature"`
+	Model     string    `json:"model"`
+	MaxTokens int       `json:"max_tokens"`
+	Messages  []message `json:"messages"`
 }
 
 type message struct {
@@ -29,9 +29,31 @@ type response struct {
 	Content []struct {
 		Text string `json:"text"`
 	} `json:"content"`
+	Model string `json:"model"`
+	Usage struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+// Цены за 1M токенов (USD)
+type pricing struct {
+	InputPer1M  float64
+	OutputPer1M float64
 }
 
 var apiKey string
+
+var prices = map[string]pricing{
+	"claude-haiku-4-5-20251001":  {InputPer1M: 0.80, OutputPer1M: 4.00},
+	"claude-sonnet-4-5-20250929": {InputPer1M: 3.00, OutputPer1M: 15.00},
+	"claude-opus-4-6":            {InputPer1M: 15.00, OutputPer1M: 75.00},
+}
+
+type model struct {
+	ID    string
+	Label string
+}
 
 func main() {
 	apiKey = os.Getenv("ANTHROPIC_API_KEY")
@@ -39,33 +61,42 @@ func main() {
 		log.Fatal("ANTHROPIC_API_KEY is not set")
 	}
 
-	// Один и тот же промпт — креативная задача, чтобы разница была заметнее
-	prompt := "Придумай короткую метафору (2-3 предложения): что такое программирование?"
+	prompt := "В комнате 3 выключателя. За стеной — 3 лампочки. " +
+		"Зайти в комнату с лампочками можно только один раз. " +
+		"Как определить, какой выключатель к какой лампочке относится?"
 
-	temperatures := []float64{0, 0.7, 1.0}
-
-	labels := map[float64]string{
-		0:   "ТОЧНЫЙ (temperature = 0)",
-		0.7: "СБАЛАНСИРОВАННЫЙ (temperature = 0.7)",
-		1.0: "КРЕАТИВНЫЙ (temperature = 1.0)",
+	models := []model{
+		{ID: "claude-haiku-4-5-20251001", Label: "СЛАБАЯ — Haiku 3.5 (быстрая, дешёвая)"},
+		{ID: "claude-sonnet-4-5-20250929", Label: "СРЕДНЯЯ — Sonnet 4.5 (баланс)"},
+		{ID: "claude-opus-4-6", Label: "СИЛЬНАЯ — Opus 4.6 (максимальное качество)"},
 	}
 
-	// Для каждой температуры делаем 3 запроса, чтобы оценить разнообразие
-	for _, temp := range temperatures {
+	for _, m := range models {
 		fmt.Println("==================================================")
-		fmt.Printf("  %s\n", labels[temp])
+		fmt.Printf("  %s\n", m.Label)
 		fmt.Println("==================================================")
 
-		for i := 1; i <= 3; i++ {
-			fmt.Printf("\n--- Попытка %d ---\n", i)
-			resp := sendRequest(request{
-				Model:       "claude-haiku-4-5-20251001",
-				MaxTokens:   200,
-				Temperature: temp,
-				Messages:    []message{{Role: "user", Content: prompt}},
-			})
-			printResponse(resp)
-		}
+		start := time.Now()
+		resp := sendRequest(request{
+			Model:     m.ID,
+			MaxTokens: 1024,
+			Messages:  []message{{Role: "user", Content: prompt}},
+		})
+		elapsed := time.Since(start)
+
+		// Ответ
+		printResponse(resp)
+
+		// Метрики
+		in := resp.Usage.InputTokens
+		out := resp.Usage.OutputTokens
+		p := prices[m.ID]
+		cost := float64(in)/1_000_000*p.InputPer1M + float64(out)/1_000_000*p.OutputPer1M
+
+		fmt.Println("\n--- Метрики ---")
+		fmt.Printf("Время ответа:    %s\n", elapsed.Round(time.Millisecond))
+		fmt.Printf("Токены (in/out): %d / %d\n", in, out)
+		fmt.Printf("Стоимость:       $%.6f\n", cost)
 		fmt.Println()
 	}
 }
