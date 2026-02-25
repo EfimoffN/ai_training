@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 )
 
 const apiURL = "https://api.anthropic.com/v1/messages"
@@ -13,10 +14,11 @@ const apiURL = "https://api.anthropic.com/v1/messages"
 // Agent — инкапсулирует логику общения с LLM.
 // Хранит конфигурацию, историю сообщений и системный промпт.
 type Agent struct {
-	apiKey  string
-	model   string
-	system  string
-	history []message
+	apiKey      string
+	model       string
+	system      string
+	history     []message
+	historyFile string // путь к JSON-файлу для персистентности
 }
 
 type message struct {
@@ -41,17 +43,26 @@ type apiResponse struct {
 	} `json:"usage"`
 }
 
-// New создаёт нового агента с заданным API-ключом, моделью и системным промптом.
-func New(apiKey, model, system string) *Agent {
-	return &Agent{
-		apiKey: apiKey,
-		model:  model,
-		system: system,
+// New создаёт нового агента.
+// historyFile — путь к JSON-файлу для сохранения истории (пустая строка = без персистентности).
+func New(apiKey, model, system, historyFile string) *Agent {
+	a := &Agent{
+		apiKey:      apiKey,
+		model:       model,
+		system:      system,
+		historyFile: historyFile,
 	}
+
+	// Загружаем историю из файла, если он существует
+	if historyFile != "" {
+		a.load()
+	}
+
+	return a
 }
 
 // Ask отправляет сообщение пользователя в LLM и возвращает ответ.
-// История сообщений сохраняется — агент помнит контекст диалога.
+// История сохраняется в памяти и на диск после каждого обмена.
 func (a *Agent) Ask(userMessage string) (string, error) {
 	a.history = append(a.history, message{Role: "user", Content: userMessage})
 
@@ -100,18 +111,53 @@ func (a *Agent) Ask(userMessage string) (string, error) {
 
 	text := result.Content[0].Text
 
-	// Сохраняем ответ ассистента в историю для контекста
+	// Сохраняем ответ ассистента в историю
 	a.history = append(a.history, message{Role: "assistant", Content: text})
+
+	// Сохраняем историю на диск
+	a.save()
 
 	return text, nil
 }
 
-// Reset очищает историю диалога.
+// Reset очищает историю диалога и удаляет файл.
 func (a *Agent) Reset() {
 	a.history = nil
+	if a.historyFile != "" {
+		os.Remove(a.historyFile)
+	}
 }
 
 // HistoryLen возвращает количество сообщений в истории.
 func (a *Agent) HistoryLen() int {
 	return len(a.history)
+}
+
+// load загружает историю из JSON-файла.
+func (a *Agent) load() {
+	data, err := os.ReadFile(a.historyFile)
+	if err != nil {
+		return // файла нет — начинаем с чистой истории
+	}
+
+	var msgs []message
+	if err := json.Unmarshal(data, &msgs); err != nil {
+		return // битый файл — начинаем заново
+	}
+
+	a.history = msgs
+}
+
+// save записывает историю в JSON-файл.
+func (a *Agent) save() {
+	if a.historyFile == "" {
+		return
+	}
+
+	data, err := json.MarshalIndent(a.history, "", "  ")
+	if err != nil {
+		return
+	}
+
+	os.WriteFile(a.historyFile, data, 0644)
 }
