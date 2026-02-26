@@ -12,13 +12,26 @@ import (
 const apiURL = "https://api.anthropic.com/v1/messages"
 
 // Agent — инкапсулирует логику общения с LLM.
-// Хранит конфигурацию, историю сообщений и системный промпт.
 type Agent struct {
 	apiKey      string
 	model       string
 	system      string
 	history     []message
-	historyFile string // путь к JSON-файлу для персистентности
+	historyFile string
+	stats       Stats
+}
+
+// Stats — накопленная статистика по токенам за сессию.
+type Stats struct {
+	TotalInputTokens  int     // сколько всего input-токенов отправлено
+	TotalOutputTokens int     // сколько всего output-токенов получено
+	TotalCost         float64 // суммарная стоимость в USD
+	Requests          int     // количество запросов
+
+	// Последний запрос
+	LastInputTokens  int
+	LastOutputTokens int
+	LastCost         float64
 }
 
 type message struct {
@@ -43,8 +56,13 @@ type apiResponse struct {
 	} `json:"usage"`
 }
 
+// Цены за 1M токенов (USD) для Haiku 3.5
+const (
+	inputPricePer1M  = 0.80
+	outputPricePer1M = 4.00
+)
+
 // New создаёт нового агента.
-// historyFile — путь к JSON-файлу для сохранения истории (пустая строка = без персистентности).
 func New(apiKey, model, system, historyFile string) *Agent {
 	a := &Agent{
 		apiKey:      apiKey,
@@ -53,7 +71,6 @@ func New(apiKey, model, system, historyFile string) *Agent {
 		historyFile: historyFile,
 	}
 
-	// Загружаем историю из файла, если он существует
 	if historyFile != "" {
 		a.load()
 	}
@@ -62,7 +79,6 @@ func New(apiKey, model, system, historyFile string) *Agent {
 }
 
 // Ask отправляет сообщение пользователя в LLM и возвращает ответ.
-// История сохраняется в памяти и на диск после каждого обмена.
 func (a *Agent) Ask(userMessage string) (string, error) {
 	a.history = append(a.history, message{Role: "user", Content: userMessage})
 
@@ -111,18 +127,24 @@ func (a *Agent) Ask(userMessage string) (string, error) {
 
 	text := result.Content[0].Text
 
-	// Сохраняем ответ ассистента в историю
-	a.history = append(a.history, message{Role: "assistant", Content: text})
+	// Обновляем статистику
+	a.updateStats(result.Usage.InputTokens, result.Usage.OutputTokens)
 
-	// Сохраняем историю на диск
+	a.history = append(a.history, message{Role: "assistant", Content: text})
 	a.save()
 
 	return text, nil
 }
 
-// Reset очищает историю диалога и удаляет файл.
+// GetStats возвращает текущую статистику.
+func (a *Agent) GetStats() Stats {
+	return a.stats
+}
+
+// Reset очищает историю диалога, файл и статистику.
 func (a *Agent) Reset() {
 	a.history = nil
+	a.stats = Stats{}
 	if a.historyFile != "" {
 		os.Remove(a.historyFile)
 	}
@@ -133,22 +155,34 @@ func (a *Agent) HistoryLen() int {
 	return len(a.history)
 }
 
-// load загружает историю из JSON-файла.
+func (a *Agent) updateStats(inputTokens, outputTokens int) {
+	cost := float64(inputTokens)/1_000_000*inputPricePer1M +
+		float64(outputTokens)/1_000_000*outputPricePer1M
+
+	a.stats.LastInputTokens = inputTokens
+	a.stats.LastOutputTokens = outputTokens
+	a.stats.LastCost = cost
+
+	a.stats.TotalInputTokens += inputTokens
+	a.stats.TotalOutputTokens += outputTokens
+	a.stats.TotalCost += cost
+	a.stats.Requests++
+}
+
 func (a *Agent) load() {
 	data, err := os.ReadFile(a.historyFile)
 	if err != nil {
-		return // файла нет — начинаем с чистой истории
+		return
 	}
 
 	var msgs []message
 	if err := json.Unmarshal(data, &msgs); err != nil {
-		return // битый файл — начинаем заново
+		return
 	}
 
 	a.history = msgs
 }
 
-// save записывает историю в JSON-файл.
 func (a *Agent) save() {
 	if a.historyFile == "" {
 		return

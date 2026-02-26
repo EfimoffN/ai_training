@@ -16,7 +16,6 @@ func main() {
 		log.Fatal("ANTHROPIC_API_KEY is not set")
 	}
 
-	// Создаём агента — история автоматически загрузится из файла
 	a := agent.New(
 		apiKey,
 		"claude-haiku-4-5-20251001",
@@ -28,7 +27,8 @@ func main() {
 		fmt.Printf("[Загружена история: %d сообщений]\n", a.HistoryLen())
 	}
 
-	fmt.Println("Чат с агентом (введите 'выход' для завершения, 'сброс' для новой темы)")
+	fmt.Println("Чат с агентом")
+	fmt.Println("Команды: 'выход', 'сброс', 'стат'")
 	fmt.Println(strings.Repeat("=", 60))
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -46,11 +46,14 @@ func main() {
 
 		switch strings.ToLower(input) {
 		case "выход":
-			fmt.Println("До свидания!")
+			printFinalStats(a.GetStats())
 			return
 		case "сброс":
 			a.Reset()
-			fmt.Println("[История очищена — начинаем новый диалог]")
+			fmt.Println("[История и статистика очищены]")
+			continue
+		case "стат":
+			printDetailedStats(a.GetStats(), a.HistoryLen())
 			continue
 		}
 
@@ -60,7 +63,38 @@ func main() {
 			continue
 		}
 
+		s := a.GetStats()
+
 		fmt.Printf("\nАгент: %s\n", reply)
-		fmt.Printf("[сообщений в истории: %d]\n", a.HistoryLen())
+		fmt.Printf("[токены: %d in / %d out | стоимость запроса: $%.6f | всего: $%.6f]\n",
+			s.LastInputTokens, s.LastOutputTokens, s.LastCost, s.TotalCost)
 	}
+}
+
+func printDetailedStats(s agent.Stats, historyLen int) {
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Println("  СТАТИСТИКА СЕССИИ")
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Printf("  Запросов:          %d\n", s.Requests)
+	fmt.Printf("  Сообщений:         %d\n", historyLen)
+	fmt.Printf("  Input токенов:     %d\n", s.TotalInputTokens)
+	fmt.Printf("  Output токенов:    %d\n", s.TotalOutputTokens)
+	fmt.Printf("  Всего токенов:     %d\n", s.TotalInputTokens+s.TotalOutputTokens)
+	fmt.Printf("  Общая стоимость:   $%.6f\n", s.TotalCost)
+	if s.Requests > 0 {
+		fmt.Printf("  Среднее input/запрос: %d\n", s.TotalInputTokens/s.Requests)
+	}
+	fmt.Println(strings.Repeat("-", 40))
+}
+
+func printFinalStats(s agent.Stats) {
+	if s.Requests == 0 {
+		fmt.Println("До свидания!")
+		return
+	}
+	fmt.Println("\n  ИТОГО ЗА СЕССИЮ")
+	fmt.Printf("  %d запросов | %d токенов | $%.6f\n",
+		s.Requests, s.TotalInputTokens+s.TotalOutputTokens, s.TotalCost)
+	fmt.Println("До свидания!")
 }
