@@ -21,14 +21,19 @@ func main() {
 		"claude-haiku-4-5-20251001",
 		"Ты — полезный ассистент. Отвечай кратко и по делу на русском языке.",
 		"history.json",
+		6,  // keepLast: хранить 6 последних сообщений "как есть"
+		10, // compressAt: сжимать при >10 сообщениях в истории
 	)
 
 	if a.HistoryLen() > 0 {
 		fmt.Printf("[Загружена история: %d сообщений]\n", a.HistoryLen())
 	}
+	if a.GetSummary() != "" {
+		fmt.Println("[Загружен summary предыдущего диалога]")
+	}
 
-	fmt.Println("Чат с агентом")
-	fmt.Println("Команды: 'выход', 'сброс', 'стат'")
+	fmt.Println("Чат с агентом (сжатие: каждые 10 сообщений, хранит последние 6)")
+	fmt.Println("Команды: 'выход', 'сброс', 'стат', 'summary'")
 	fmt.Println(strings.Repeat("=", 60))
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -50,10 +55,17 @@ func main() {
 			return
 		case "сброс":
 			a.Reset()
-			fmt.Println("[История и статистика очищены]")
+			fmt.Println("[История, summary и статистика очищены]")
 			continue
 		case "стат":
-			printDetailedStats(a.GetStats(), a.HistoryLen())
+			printDetailedStats(a.GetStats(), a.HistoryLen(), a.GetSummary())
+			continue
+		case "summary":
+			if s := a.GetSummary(); s != "" {
+				fmt.Printf("\n[SUMMARY]\n%s\n", s)
+			} else {
+				fmt.Println("\n[Summary пока пуст — сжатие ещё не происходило]")
+			}
 			continue
 		}
 
@@ -65,27 +77,37 @@ func main() {
 
 		s := a.GetStats()
 
+		if a.Compressed {
+			fmt.Println("[Сжатие выполнено! Старые сообщения заменены на summary]")
+		}
+
 		fmt.Printf("\nАгент: %s\n", reply)
-		fmt.Printf("[токены: %d in / %d out | стоимость запроса: $%.6f | всего: $%.6f]\n",
-			s.LastInputTokens, s.LastOutputTokens, s.LastCost, s.TotalCost)
+		fmt.Printf("[токены: %d in / %d out | запрос: $%.6f | всего: $%.6f | история: %d сообщ.]\n",
+			s.LastInputTokens, s.LastOutputTokens, s.LastCost, s.TotalCost, a.HistoryLen())
 	}
 }
 
-func printDetailedStats(s agent.Stats, historyLen int) {
+func printDetailedStats(s agent.Stats, historyLen int, summary string) {
 	fmt.Println()
-	fmt.Println(strings.Repeat("-", 40))
+	fmt.Println(strings.Repeat("-", 45))
 	fmt.Println("  СТАТИСТИКА СЕССИИ")
-	fmt.Println(strings.Repeat("-", 40))
-	fmt.Printf("  Запросов:          %d\n", s.Requests)
-	fmt.Printf("  Сообщений:         %d\n", historyLen)
-	fmt.Printf("  Input токенов:     %d\n", s.TotalInputTokens)
-	fmt.Printf("  Output токенов:    %d\n", s.TotalOutputTokens)
-	fmt.Printf("  Всего токенов:     %d\n", s.TotalInputTokens+s.TotalOutputTokens)
-	fmt.Printf("  Общая стоимость:   $%.6f\n", s.TotalCost)
+	fmt.Println(strings.Repeat("-", 45))
+	fmt.Printf("  Запросов к API:      %d\n", s.Requests)
+	fmt.Printf("  Сообщений в истории: %d\n", historyLen)
+	fmt.Printf("  Сжатий выполнено:    %d\n", s.Compressions)
+	hasSummary := "нет"
+	if summary != "" {
+		hasSummary = fmt.Sprintf("да (%d символов)", len(summary))
+	}
+	fmt.Printf("  Summary:             %s\n", hasSummary)
+	fmt.Printf("  Input токенов:       %d\n", s.TotalInputTokens)
+	fmt.Printf("  Output токенов:      %d\n", s.TotalOutputTokens)
+	fmt.Printf("  Всего токенов:       %d\n", s.TotalInputTokens+s.TotalOutputTokens)
+	fmt.Printf("  Общая стоимость:     $%.6f\n", s.TotalCost)
 	if s.Requests > 0 {
 		fmt.Printf("  Среднее input/запрос: %d\n", s.TotalInputTokens/s.Requests)
 	}
-	fmt.Println(strings.Repeat("-", 40))
+	fmt.Println(strings.Repeat("-", 45))
 }
 
 func printFinalStats(s agent.Stats) {
@@ -94,7 +116,7 @@ func printFinalStats(s agent.Stats) {
 		return
 	}
 	fmt.Println("\n  ИТОГО ЗА СЕССИЮ")
-	fmt.Printf("  %d запросов | %d токенов | $%.6f\n",
-		s.Requests, s.TotalInputTokens+s.TotalOutputTokens, s.TotalCost)
+	fmt.Printf("  %d запросов | %d токенов | %d сжатий | $%.6f\n",
+		s.Requests, s.TotalInputTokens+s.TotalOutputTokens, s.Compressions, s.TotalCost)
 	fmt.Println("До свидания!")
 }
