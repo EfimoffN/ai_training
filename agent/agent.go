@@ -6,41 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strings"
 )
 
 const apiURL = "https://api.anthropic.com/v1/messages"
 
-// Agent — инкапсулирует логику общения с LLM.
-type Agent struct {
-	apiKey      string
-	model       string
-	system      string
-	history     []message  // полная история (для сохранения на диск)
-	summary     string     // сжатый контекст старых сообщений
-	keepLast    int        // сколько последних сообщений оставлять "как есть"
-	compressAt  int        // при каком размере истории запускать сжатие
-	historyFile string
-	stats       Stats
-	Compressed  bool // было ли сжатие в последнем запросе
-}
-
-// Stats — накопленная статистика по токенам за сессию.
-type Stats struct {
-	TotalInputTokens  int
-	TotalOutputTokens int
-	TotalCost         float64
-	Requests          int
-
-	LastInputTokens  int
-	LastOutputTokens int
-	LastCost         float64
-
-	Compressions int // сколько раз выполнялось сжатие
-}
-
-type message struct {
+// Message — сообщение в диалоге (экспортируемый тип для стратегий).
+type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
@@ -49,7 +20,7 @@ type apiRequest struct {
 	Model     string    `json:"model"`
 	MaxTokens int       `json:"max_tokens"`
 	System    string    `json:"system,omitempty"`
-	Messages  []message `json:"messages"`
+	Messages  []Message `json:"messages"`
 }
 
 type apiResponse struct {
@@ -62,56 +33,76 @@ type apiResponse struct {
 	} `json:"usage"`
 }
 
+// Stats — накопленная статистика по токенам.
+type Stats struct {
+	TotalInputTokens  int
+	TotalOutputTokens int
+	TotalCost         float64
+	Requests          int
+
+	LastInputTokens  int
+	LastOutputTokens int
+	LastCost         float64
+}
+
 const (
 	inputPricePer1M  = 0.80
 	outputPricePer1M = 4.00
 )
 
-// persistData — структура для сохранения на диск (история + summary).
-type persistData struct {
-	Summary string    `json:"summary,omitempty"`
-	History []message `json:"history"`
+// Strategy — интерфейс стратегии управления контекстом.
+type Strategy interface {
+	// Name возвращает название стратегии.
+	Name() string
+	// BuildSystem формирует системный промпт (может добавлять facts и т.д.).
+	BuildSystem(baseSystem string) string
+	// BuildMessages возвращает сообщения для отправки в API.
+	BuildMessages() []Message
+	// AddUser добавляет сообщение пользователя.
+	AddUser(content string)
+	// AddAssistant добавляет ответ ассистента.
+	AddAssistant(content string)
+	// PostProcess вызывается после получения ответа (для извлечения фактов и т.п.).
+	// Получает доступ к LLM через callback.
+	PostProcess(llmCall func(system string, msgs []Message, maxTokens int) (string, error))
+	// Reset очищает всё состояние.
+	Reset()
+	// Info возвращает текстовую информацию о текущем состоянии стратегии.
+	Info() string
+	// HistoryLen возвращает количество сообщений.
+	HistoryLen() int
 }
 
-// New создаёт нового агента.
-// keepLast — сколько последних сообщений сохранять без сжатия.
-// compressAt — при каком количестве сообщений запускать сжатие.
-func New(apiKey, model, system, historyFile string, keepLast, compressAt int) *Agent {
-	a := &Agent{
-		apiKey:      apiKey,
-		model:       model,
-		system:      system,
-		historyFile: historyFile,
-		keepLast:    keepLast,
-		compressAt:  compressAt,
-	}
-
-	if historyFile != "" {
-		a.load()
-	}
-
-	return a
+// Agent — инкапсулирует LLM-вызовы и делегирует управление контекстом стратегии.
+type Agent struct {
+	apiKey   string
+	model    string
+	system   string
+	strategy Strategy
+	stats    Stats
 }
 
-// Ask отправляет сообщение пользователя в LLM и возвращает ответ.
+// New создаёт агента с заданной стратегией.
+func New(apiKey, model, system string, strategy Strategy) *Agent {
+	return &Agent{
+		apiKey:   apiKey,
+		model:    model,
+		system:   system,
+		strategy: strategy,
+	}
+}
+
+// Ask отправляет сообщение пользователя и возвращает ответ.
 func (a *Agent) Ask(userMessage string) (string, error) {
-	a.history = append(a.history, message{Role: "user", Content: userMessage})
-	a.Compressed = false
+	a.strategy.AddUser(userMessage)
 
-	// Сжимаем историю, если она превысила порог
-	if len(a.history) > a.compressAt {
-		if err := a.compress(); err != nil {
-			return "", fmt.Errorf("compress: %w", err)
-		}
-	}
-
-	// Собираем сообщения для API: summary + последние N
-	msgs := a.buildMessages()
+	msgs := a.strategy.BuildMessages()
+	sys := a.strategy.BuildSystem(a.system)
 
 	body, err := json.Marshal(apiRequest{
 		Model:     a.model,
 		MaxTokens: 1024,
-		System:    a.buildSystem(),
+		System:    sys,
 		Messages:  msgs,
 	})
 	if err != nil {
@@ -124,107 +115,55 @@ func (a *Agent) Ask(userMessage string) (string, error) {
 	}
 
 	a.updateStats(usage.input, usage.output)
-	a.history = append(a.history, message{Role: "assistant", Content: text})
-	a.save()
+	a.strategy.AddAssistant(text)
+
+	// PostProcess — стратегия может вызвать LLM (например, для извлечения фактов)
+	a.strategy.PostProcess(func(sys string, msgs []Message, maxTokens int) (string, error) {
+		b, err := json.Marshal(apiRequest{
+			Model:     a.model,
+			MaxTokens: maxTokens,
+			System:    sys,
+			Messages:  msgs,
+		})
+		if err != nil {
+			return "", err
+		}
+		text, usage, err := a.doRequest(b)
+		if err != nil {
+			return "", err
+		}
+		a.updateStats(usage.input, usage.output)
+		return text, nil
+	})
 
 	return text, nil
 }
 
-// GetStats возвращает текущую статистику.
+// SetStrategy переключает стратегию на лету.
+func (a *Agent) SetStrategy(s Strategy) {
+	a.strategy = s
+	a.stats = Stats{} // сбрасываем статистику при смене стратегии
+}
+
+// GetStrategy возвращает текущую стратегию.
+func (a *Agent) GetStrategy() Strategy {
+	return a.strategy
+}
+
+// GetStats возвращает статистику.
 func (a *Agent) GetStats() Stats {
 	return a.stats
 }
 
-// GetSummary возвращает текущий сжатый контекст.
-func (a *Agent) GetSummary() string {
-	return a.summary
-}
-
-// Reset очищает всё.
+// Reset сбрасывает стратегию и статистику.
 func (a *Agent) Reset() {
-	a.history = nil
-	a.summary = ""
+	a.strategy.Reset()
 	a.stats = Stats{}
-	if a.historyFile != "" {
-		os.Remove(a.historyFile)
-	}
 }
 
-// HistoryLen возвращает количество сообщений в текущей истории.
+// HistoryLen делегирует стратегии.
 func (a *Agent) HistoryLen() int {
-	return len(a.history)
-}
-
-// buildSystem формирует системный промпт с учётом summary.
-func (a *Agent) buildSystem() string {
-	if a.summary == "" {
-		return a.system
-	}
-	return a.system + "\n\n" +
-		"Краткое содержание предыдущей части диалога:\n" + a.summary
-}
-
-// buildMessages возвращает сообщения для отправки в API.
-func (a *Agent) buildMessages() []message {
-	return a.history
-}
-
-// compress сжимает старые сообщения в summary через вызов LLM.
-func (a *Agent) compress() error {
-	// Определяем, какие сообщения сжать (всё кроме последних keepLast)
-	cutoff := len(a.history) - a.keepLast
-	if cutoff <= 0 {
-		return nil
-	}
-
-	oldMessages := a.history[:cutoff]
-
-	// Формируем текст для суммаризации
-	var sb strings.Builder
-	if a.summary != "" {
-		sb.WriteString("Предыдущее краткое содержание:\n")
-		sb.WriteString(a.summary)
-		sb.WriteString("\n\n")
-	}
-	sb.WriteString("Новые сообщения для суммаризации:\n")
-	for _, m := range oldMessages {
-		if m.Role == "user" {
-			sb.WriteString("Пользователь: ")
-		} else {
-			sb.WriteString("Ассистент: ")
-		}
-		sb.WriteString(m.Content)
-		sb.WriteString("\n")
-	}
-
-	// Просим LLM сжать
-	body, err := json.Marshal(apiRequest{
-		Model:     a.model,
-		MaxTokens: 300,
-		System: "Ты — суммаризатор диалогов. " +
-			"Сожми диалог в краткое содержание (3-5 предложений). " +
-			"Сохрани ключевые факты, имена и решения. " +
-			"Верни ТОЛЬКО краткое содержание.",
-		Messages: []message{{Role: "user", Content: sb.String()}},
-	})
-	if err != nil {
-		return err
-	}
-
-	text, usage, err := a.doRequest(body)
-	if err != nil {
-		return err
-	}
-
-	a.updateStats(usage.input, usage.output)
-
-	// Обновляем summary и обрезаем историю
-	a.summary = text
-	a.history = a.history[cutoff:]
-	a.stats.Compressions++
-	a.Compressed = true
-
-	return nil
+	return a.strategy.HistoryLen()
 }
 
 type usageInfo struct {
@@ -235,7 +174,7 @@ type usageInfo struct {
 func (a *Agent) doRequest(body []byte) (string, usageInfo, error) {
 	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(body))
 	if err != nil {
-		return "", usageInfo{}, fmt.Errorf("new request: %w", err)
+		return "", usageInfo{}, err
 	}
 
 	req.Header.Set("x-api-key", a.apiKey)
@@ -244,13 +183,13 @@ func (a *Agent) doRequest(body []byte) (string, usageInfo, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", usageInfo{}, fmt.Errorf("do request: %w", err)
+		return "", usageInfo{}, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", usageInfo{}, fmt.Errorf("read body: %w", err)
+		return "", usageInfo{}, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -259,7 +198,7 @@ func (a *Agent) doRequest(body []byte) (string, usageInfo, error) {
 
 	var result apiResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", usageInfo{}, fmt.Errorf("unmarshal: %w", err)
+		return "", usageInfo{}, err
 	}
 
 	if len(result.Content) == 0 {
@@ -284,41 +223,4 @@ func (a *Agent) updateStats(inputTokens, outputTokens int) {
 	a.stats.TotalOutputTokens += outputTokens
 	a.stats.TotalCost += cost
 	a.stats.Requests++
-}
-
-func (a *Agent) load() {
-	data, err := os.ReadFile(a.historyFile)
-	if err != nil {
-		return
-	}
-
-	var pd persistData
-	if err := json.Unmarshal(data, &pd); err != nil {
-		// Обратная совместимость: пробуем старый формат (просто массив)
-		var msgs []message
-		if err := json.Unmarshal(data, &msgs); err != nil {
-			return
-		}
-		a.history = msgs
-		return
-	}
-
-	a.summary = pd.Summary
-	a.history = pd.History
-}
-
-func (a *Agent) save() {
-	if a.historyFile == "" {
-		return
-	}
-
-	data, err := json.MarshalIndent(persistData{
-		Summary: a.summary,
-		History: a.history,
-	}, "", "  ")
-	if err != nil {
-		return
-	}
-
-	os.WriteFile(a.historyFile, data, 0644)
 }
