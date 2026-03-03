@@ -24,10 +24,11 @@ func main() {
 		"1": agent.NewSlidingWindow(6),
 		"2": agent.NewStickyFacts(6),
 		"3": agent.NewBranching(),
+		"4": agent.NewMemoryLayers(6, "long_term_memory.json"),
 	}
 
-	// По умолчанию — Sliding Window
-	a := agent.New(apiKey, model, system, strategies["1"])
+	// По умолчанию — Memory Layers
+	a := agent.New(apiKey, model, system, strategies["4"])
 
 	printHelp(a)
 	scanner := bufio.NewScanner(os.Stdin)
@@ -71,7 +72,7 @@ func main() {
 				a.SetStrategy(s)
 				fmt.Printf("[Стратегия: %s]\n", s.Name())
 			} else {
-				fmt.Println("[Неизвестная стратегия. Доступные: 1, 2, 3]")
+				fmt.Println("[Неизвестная стратегия. Доступные: 1, 2, 3, 4]")
 			}
 			continue
 		}
@@ -113,6 +114,32 @@ func main() {
 			}
 		}
 
+		// Команды Memory Layers
+		if mem, ok := a.GetStrategy().(*agent.MemoryLayers); ok {
+			switch cmd {
+			case "память":
+				printMemoryLayers(mem)
+				continue
+			case "кратко":
+				printShortTerm(mem)
+				continue
+			case "рабочая":
+				printWorkingMemory(mem)
+				continue
+			case "долго":
+				printLongTerm(mem)
+				continue
+			case "сброс задачи":
+				mem.ResetWorking()
+				fmt.Println("[Рабочая память очищена]")
+				continue
+			case "сброс долго":
+				mem.ResetLongTerm()
+				fmt.Println("[Долговременная память очищена]")
+				continue
+			}
+		}
+
 		// Обычное сообщение — отправляем агенту
 		reply, err := a.Ask(input)
 		if err != nil {
@@ -135,6 +162,7 @@ func printHelp(a *agent.Agent) {
 	fmt.Println("  стратегия 1  — Sliding Window (последние N сообщений)")
 	fmt.Println("  стратегия 2  — Sticky Facts (факты + последние N)")
 	fmt.Println("  стратегия 3  — Branching (ветки диалога)")
+	fmt.Println("  стратегия 4  — Memory Layers (3 слоя памяти)")
 	fmt.Println()
 	fmt.Println("  стат         — статистика токенов")
 	fmt.Println("  инфо         — состояние текущей стратегии")
@@ -149,6 +177,14 @@ func printHelp(a *agent.Agent) {
 	fmt.Println("  ветка <имя>  — создать ветку от текущей точки")
 	fmt.Println("  перейти <имя>— переключиться на ветку")
 	fmt.Println("  ветки        — список всех веток")
+	fmt.Println()
+	fmt.Println("Memory Layers:")
+	fmt.Println("  память       — все три слоя памяти")
+	fmt.Println("  кратко       — краткосрочная (текущий диалог)")
+	fmt.Println("  рабочая      — рабочая (текущая задача)")
+	fmt.Println("  долго        — долговременная (профиль, знания)")
+	fmt.Println("  сброс задачи — очистить рабочую память")
+	fmt.Println("  сброс долго  — очистить долговременную память")
 	fmt.Println(strings.Repeat("=", 60))
 }
 
@@ -181,4 +217,106 @@ func printFinalStats(a *agent.Agent) {
 		a.GetStrategy().Name(), s.Requests,
 		s.TotalInputTokens+s.TotalOutputTokens, s.TotalCost)
 	fmt.Println("До свидания!")
+}
+
+// --- Функции вывода слоёв памяти ---
+
+func printMemoryLayers(mem *agent.MemoryLayers) {
+	fmt.Println()
+	fmt.Println(strings.Repeat("=", 50))
+	fmt.Println("  МОДЕЛЬ ПАМЯТИ — ВСЕ СЛОИ")
+	fmt.Println(strings.Repeat("=", 50))
+	printShortTerm(mem)
+	printWorkingMemory(mem)
+	printLongTerm(mem)
+}
+
+func printShortTerm(mem *agent.MemoryLayers) {
+	msgs := mem.GetShortTerm()
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Printf("  КРАТКОСРОЧНАЯ ПАМЯТЬ (%d сообщений)\n", len(msgs))
+	fmt.Println("  Содержит: последние сообщения текущего диалога")
+	fmt.Println(strings.Repeat("-", 50))
+	if len(msgs) == 0 {
+		fmt.Println("  (пусто)")
+		return
+	}
+	for i, m := range msgs {
+		role := "User"
+		if m.Role == "assistant" {
+			role = "Asst"
+		}
+		text := m.Content
+		if len(text) > 80 {
+			text = text[:80] + "..."
+		}
+		fmt.Printf("  %d. [%s] %s\n", i+1, role, text)
+	}
+}
+
+func printWorkingMemory(mem *agent.MemoryLayers) {
+	w := mem.GetWorking()
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println("  РАБОЧАЯ ПАМЯТЬ (текущая задача)")
+	fmt.Println("  Содержит: цель, ограничения, прогресс")
+	fmt.Println(strings.Repeat("-", 50))
+	if w.Task == "" {
+		fmt.Println("  (задача не определена)")
+		return
+	}
+	fmt.Printf("  Задача: %s\n", w.Task)
+	if len(w.Goals) > 0 {
+		fmt.Println("  Цели:")
+		for _, g := range w.Goals {
+			fmt.Printf("    - %s\n", g)
+		}
+	}
+	if len(w.Constraints) > 0 {
+		fmt.Println("  Ограничения:")
+		for _, c := range w.Constraints {
+			fmt.Printf("    - %s\n", c)
+		}
+	}
+	if len(w.Progress) > 0 {
+		fmt.Println("  Прогресс:")
+		for _, p := range w.Progress {
+			fmt.Printf("    - %s\n", p)
+		}
+	}
+}
+
+func printLongTerm(mem *agent.MemoryLayers) {
+	lt := mem.GetLongTerm()
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println("  ДОЛГОВРЕМЕННАЯ ПАМЯТЬ (персистентная)")
+	fmt.Println("  Содержит: профиль, решения, знания")
+	fmt.Println(strings.Repeat("-", 50))
+	if len(lt.Profile) == 0 && len(lt.Decisions) == 0 && len(lt.Knowledge) == 0 {
+		fmt.Println("  (пусто)")
+		return
+	}
+	if len(lt.Profile) > 0 {
+		fmt.Println("  Профиль:")
+		for k, v := range lt.Profile {
+			fmt.Printf("    %s: %s\n", k, v)
+		}
+	}
+	if len(lt.Decisions) > 0 {
+		fmt.Println("  Решения:")
+		for _, d := range lt.Decisions {
+			fmt.Printf("    - %s\n", d)
+		}
+	}
+	if len(lt.Knowledge) > 0 {
+		fmt.Println("  Знания:")
+		for _, k := range lt.Knowledge {
+			fmt.Printf("    - %s\n", k)
+		}
+	}
+	if lt.UpdatedAt != "" {
+		fmt.Printf("  Обновлено: %s\n", lt.UpdatedAt)
+	}
 }
