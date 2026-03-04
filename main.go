@@ -24,7 +24,7 @@ func main() {
 		"1": agent.NewSlidingWindow(6),
 		"2": agent.NewStickyFacts(6),
 		"3": agent.NewBranching(),
-		"4": agent.NewMemoryLayers(6, "long_term_memory.json"),
+		"4": agent.NewMemoryLayers(6, "long_term_memory.json", "user_profile.json"),
 	}
 
 	// По умолчанию — Memory Layers
@@ -45,6 +45,12 @@ func main() {
 		}
 
 		cmd := strings.ToLower(input)
+
+		// DEBUG: показываем тип стратегии при вводе "дебаг"
+		if cmd == "дебаг" {
+			fmt.Printf("[DEBUG] strategy type: %T\n", a.GetStrategy())
+			continue
+		}
 
 		// Общие команды
 		switch cmd {
@@ -137,6 +143,64 @@ func main() {
 				mem.ResetLongTerm()
 				fmt.Println("[Долговременная память очищена]")
 				continue
+			case "профиль":
+				printProfile(mem)
+				continue
+			case "профили":
+				printPresets()
+				continue
+			case "сброс профиля":
+				mem.ResetProfile()
+				fmt.Println("[Профиль сброшен]")
+				continue
+			}
+
+			// Применение пресета: "пресет новичок"
+			if name, ok := strings.CutPrefix(cmd, "пресет "); ok {
+				presets := agent.PresetProfiles()
+				if p, exists := presets[name]; exists {
+					// Сохраняем имя из текущего профиля
+					if cur := mem.GetProfile(); cur.Name != "" {
+						p.Name = cur.Name
+					}
+					mem.SetProfile(p)
+					fmt.Printf("[Профиль: %s]\n", name)
+					printProfile(mem)
+				} else {
+					fmt.Println("[Неизвестный пресет. Доступные:]")
+					printPresets()
+				}
+				continue
+			}
+
+			// Установка полей: "имя Алексей", "стиль formal", и т.д.
+			if val, ok := strings.CutPrefix(cmd, "имя "); ok {
+				p := mem.GetProfile()
+				p.Name = val
+				mem.SetProfile(p)
+				fmt.Printf("[Имя: %s]\n", val)
+				continue
+			}
+			if val, ok := strings.CutPrefix(cmd, "стиль "); ok {
+				p := mem.GetProfile()
+				p.Style = val
+				mem.SetProfile(p)
+				fmt.Printf("[Стиль: %s]\n", val)
+				continue
+			}
+			if val, ok := strings.CutPrefix(cmd, "формат "); ok {
+				p := mem.GetProfile()
+				p.Format = val
+				mem.SetProfile(p)
+				fmt.Printf("[Формат: %s]\n", val)
+				continue
+			}
+			if val, ok := strings.CutPrefix(cmd, "уровень "); ok {
+				p := mem.GetProfile()
+				p.Expertise = val
+				mem.SetProfile(p)
+				fmt.Printf("[Уровень: %s]\n", val)
+				continue
 			}
 		}
 
@@ -185,6 +249,16 @@ func printHelp(a *agent.Agent) {
 	fmt.Println("  долго        — долговременная (профиль, знания)")
 	fmt.Println("  сброс задачи — очистить рабочую память")
 	fmt.Println("  сброс долго  — очистить долговременную память")
+	fmt.Println()
+	fmt.Println("Персонализация:")
+	fmt.Println("  профиль        — текущий профиль")
+	fmt.Println("  профили        — список пресетов")
+	fmt.Println("  пресет <имя>   — применить пресет (новичок/разработчик/менеджер)")
+	fmt.Println("  имя <значение> — установить имя")
+	fmt.Println("  стиль <знач>   — formal / informal / technical")
+	fmt.Println("  формат <знач>  — brief / detailed / structured")
+	fmt.Println("  уровень <знач> — beginner / intermediate / expert")
+	fmt.Println("  сброс профиля  — очистить профиль")
 	fmt.Println(strings.Repeat("=", 60))
 }
 
@@ -318,5 +392,28 @@ func printLongTerm(mem *agent.MemoryLayers) {
 	}
 	if lt.UpdatedAt != "" {
 		fmt.Printf("  Обновлено: %s\n", lt.UpdatedAt)
+	}
+}
+
+// --- Функции профиля ---
+
+func printProfile(mem *agent.MemoryLayers) {
+	p := mem.GetProfile()
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println("  ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ")
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Print(p.Display())
+}
+
+func printPresets() {
+	presets := agent.PresetProfiles()
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println("  ДОСТУПНЫЕ ПРЕСЕТЫ")
+	fmt.Println(strings.Repeat("-", 50))
+	for name, p := range presets {
+		fmt.Printf("\n  [%s]\n", name)
+		fmt.Print(p.Display())
 	}
 }

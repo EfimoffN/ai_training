@@ -47,6 +47,9 @@ type MemoryLayers struct {
 	working  WorkingMemory  // рабочая: текущая задача
 	longTerm LongTermMemory // долговременная: профиль и знания
 
+	profile     UserProfile // персонализация пользователя
+	profilePath string      // путь к файлу профиля
+
 	storagePath string // путь к файлу долговременной памяти
 	lastSaved   string // контрольная сумма для предотвращения лишних сохранений
 }
@@ -54,28 +57,36 @@ type MemoryLayers struct {
 // NewMemoryLayers создаёт стратегию памяти.
 // maxShortTerm — сколько последних сообщений хранить в краткосрочной памяти.
 // storagePath — путь к JSON-файлу для долговременной памяти (пустая строка = без персистенции).
-func NewMemoryLayers(maxShortTerm int, storagePath string) *MemoryLayers {
+// profilePath — путь к JSON-файлу профиля пользователя.
+func NewMemoryLayers(maxShortTerm int, storagePath, profilePath string) *MemoryLayers {
 	m := &MemoryLayers{
 		maxShortTerm: maxShortTerm,
 		storagePath:  storagePath,
+		profilePath:  profilePath,
 		longTerm: LongTermMemory{
 			Profile: make(map[string]string),
 		},
 	}
 	m.loadLongTerm()
+	m.loadProfile()
 	return m
 }
 
 func (m *MemoryLayers) Name() string { return "Memory Layers" }
 
-// BuildSystem формирует системный промпт, включая рабочую и долговременную память.
+// BuildSystem формирует системный промпт, включая профиль, рабочую и долговременную память.
 func (m *MemoryLayers) BuildSystem(base string) string {
 	var sb strings.Builder
 	sb.WriteString(base)
 
-	// Долговременная память — профиль
+	// Персонализация — профиль пользователя (самый приоритетный блок)
+	if block := m.profile.BuildPromptBlock(); block != "" {
+		sb.WriteString(block)
+	}
+
+	// Долговременная память — извлечённые факты о пользователе
 	if len(m.longTerm.Profile) > 0 {
-		sb.WriteString("\n\n[ДОЛГОВРЕМЕННАЯ ПАМЯТЬ — ПРОФИЛЬ]\n")
+		sb.WriteString("\n\n[ДОЛГОВРЕМЕННАЯ ПАМЯТЬ — ИЗВЛЕЧЁННЫЕ ФАКТЫ]\n")
 		for k, v := range m.longTerm.Profile {
 			sb.WriteString(fmt.Sprintf("- %s: %s\n", k, v))
 		}
@@ -308,6 +319,41 @@ func (m *MemoryLayers) Info() string {
 
 func (m *MemoryLayers) HistoryLen() int {
 	return len(m.shortTerm)
+}
+
+// --- Управление профилем ---
+
+// GetProfile возвращает текущий профиль.
+func (m *MemoryLayers) GetProfile() UserProfile {
+	return m.profile
+}
+
+// SetProfile устанавливает профиль и сохраняет на диск.
+func (m *MemoryLayers) SetProfile(p UserProfile) {
+	m.profile = p
+	m.saveProfile()
+}
+
+// ResetProfile сбрасывает профиль.
+func (m *MemoryLayers) ResetProfile() {
+	m.profile = UserProfile{}
+	m.saveProfile()
+}
+
+func (m *MemoryLayers) saveProfile() {
+	if m.profilePath == "" {
+		return
+	}
+	_ = SaveProfile(m.profilePath, &m.profile)
+}
+
+func (m *MemoryLayers) loadProfile() {
+	if m.profilePath == "" {
+		return
+	}
+	if p, err := LoadProfile(m.profilePath); err == nil {
+		m.profile = *p
+	}
 }
 
 // --- Доступ к слоям для отображения в main ---
