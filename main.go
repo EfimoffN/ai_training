@@ -46,12 +46,6 @@ func main() {
 
 		cmd := strings.ToLower(input)
 
-		// DEBUG: показываем тип стратегии при вводе "дебаг"
-		if cmd == "дебаг" {
-			fmt.Printf("[DEBUG] strategy type: %T\n", a.GetStrategy())
-			continue
-		}
-
 		// Общие команды
 		switch cmd {
 		case "выход":
@@ -153,6 +147,32 @@ func main() {
 				mem.ResetProfile()
 				fmt.Println("[Профиль сброшен]")
 				continue
+			case "фаза":
+				printTaskState(mem)
+				continue
+			case "далее":
+				if err := mem.AdvancePhase(); err != nil {
+					fmt.Printf("[Ошибка: %v]\n", err)
+				} else {
+					ts := mem.GetTaskState()
+					fmt.Printf("[Фаза: %s]\n", ts.PhaseDisplayName())
+				}
+				continue
+			case "пауза":
+				if err := mem.PauseTask(); err != nil {
+					fmt.Printf("[Ошибка: %v]\n", err)
+				} else {
+					fmt.Println("[Задача поставлена на паузу]")
+				}
+				continue
+			case "продолжить":
+				if err := mem.ResumeTask(); err != nil {
+					fmt.Printf("[Ошибка: %v]\n", err)
+				} else {
+					ts := mem.GetTaskState()
+					fmt.Printf("[Задача возобновлена: %s]\n", ts.PhaseDisplayName())
+				}
+				continue
 			}
 
 			// Применение пресета: "пресет новичок"
@@ -202,6 +222,26 @@ func main() {
 				fmt.Printf("[Уровень: %s]\n", val)
 				continue
 			}
+
+			// Установка фазы вручную: "фаза планирование"
+			if val, ok := strings.CutPrefix(cmd, "фаза "); ok {
+				phaseMap := map[string]agent.TaskPhase{
+					"планирование": agent.PhasePlanning,
+					"выполнение":   agent.PhaseExecution,
+					"проверка":     agent.PhaseValidation,
+					"завершено":    agent.PhaseDone,
+				}
+				if target, exists := phaseMap[val]; exists {
+					if err := mem.SetPhase(target); err != nil {
+						fmt.Printf("[Ошибка: %v]\n", err)
+					} else {
+						fmt.Printf("[Фаза: %s]\n", mem.GetTaskState().PhaseDisplayName())
+					}
+				} else {
+					fmt.Println("[Неизвестная фаза. Доступные: планирование, выполнение, проверка, завершено]")
+				}
+				continue
+			}
 		}
 
 		// Обычное сообщение — отправляем агенту
@@ -249,6 +289,14 @@ func printHelp(a *agent.Agent) {
 	fmt.Println("  долго        — долговременная (профиль, знания)")
 	fmt.Println("  сброс задачи — очистить рабочую память")
 	fmt.Println("  сброс долго  — очистить долговременную память")
+	fmt.Println()
+	fmt.Println("Состояние задачи (конечный автомат):")
+	fmt.Println("  фаза         — текущая фаза задачи")
+	fmt.Println("  далее        — перейти к следующей фазе")
+	fmt.Println("  пауза        — приостановить задачу")
+	fmt.Println("  продолжить   — возобновить задачу")
+	fmt.Println("  фаза <имя>   — установить фазу вручную")
+	fmt.Println("                 (планирование/выполнение/проверка/завершено)")
 	fmt.Println()
 	fmt.Println("Персонализация:")
 	fmt.Println("  профиль        — текущий профиль")
@@ -358,6 +406,49 @@ func printWorkingMemory(mem *agent.MemoryLayers) {
 		for _, p := range w.Progress {
 			fmt.Printf("    - %s\n", p)
 		}
+	}
+	if w.State.Phase != "" {
+		fmt.Printf("  Фаза: %s\n", w.State.PhaseDisplayName())
+		if w.State.CurrentStep != "" {
+			fmt.Printf("  Шаг:  %s\n", w.State.CurrentStep)
+		}
+		if w.State.ExpectedAction != "" {
+			fmt.Printf("  Далее: %s\n", w.State.ExpectedAction)
+		}
+	}
+}
+
+func printTaskState(mem *agent.MemoryLayers) {
+	ts := mem.GetTaskState()
+	w := mem.GetWorking()
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println("  СОСТОЯНИЕ ЗАДАЧИ (конечный автомат)")
+	fmt.Println(strings.Repeat("-", 50))
+	if w.Task == "" {
+		fmt.Println("  (задача не определена)")
+		return
+	}
+	fmt.Printf("  Задача: %s\n", w.Task)
+	fmt.Printf("  Фаза:   %s\n", ts.PhaseDisplayName())
+	if ts.IsPaused() {
+		fmt.Println("  Статус: НА ПАУЗЕ")
+	}
+	if ts.CurrentStep != "" {
+		fmt.Printf("  Шаг:    %s\n", ts.CurrentStep)
+	}
+	if ts.ExpectedAction != "" {
+		fmt.Printf("  Далее:  %s\n", ts.ExpectedAction)
+	}
+	fmt.Println()
+	if ts.IsPaused() {
+		fmt.Println("  Доступные команды:")
+		fmt.Println("    продолжить — возобновить задачу")
+	} else {
+		fmt.Println("  Доступные команды:")
+		fmt.Println("    далее      — следующая фаза")
+		fmt.Println("    пауза      — приостановить")
+		fmt.Println("    фаза <имя> — установить вручную")
 	}
 }
 

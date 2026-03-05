@@ -22,12 +22,62 @@ import (
 //    накопленные знания. Сохраняется на диск в JSON, переживает сессии.
 // ============================================================
 
+// TaskPhase — фаза выполнения задачи (конечный автомат).
+type TaskPhase string
+
+const (
+	PhaseNone       TaskPhase = ""           // задача не определена
+	PhasePlanning   TaskPhase = "planning"   // планирование
+	PhaseExecution  TaskPhase = "execution"  // выполнение
+	PhaseValidation TaskPhase = "validation" // проверка
+	PhaseDone       TaskPhase = "done"       // завершено
+	PhasePaused     TaskPhase = "paused"     // приостановлено
+)
+
+// TaskState — состояние конечного автомата задачи.
+type TaskState struct {
+	Phase          TaskPhase `json:"phase"`           // текущая фаза
+	PausedPhase    TaskPhase `json:"paused_phase"`    // фаза до паузы
+	CurrentStep    string    `json:"current_step"`    // текущий шаг внутри фазы
+	ExpectedAction string    `json:"expected_action"` // что ожидается дальше
+}
+
+// IsActive возвращает true, если автомат активен (не пуст и не завершён).
+func (ts TaskState) IsActive() bool {
+	return ts.Phase != PhaseNone && ts.Phase != PhaseDone
+}
+
+// IsPaused возвращает true, если задача на паузе.
+func (ts TaskState) IsPaused() bool {
+	return ts.Phase == PhasePaused
+}
+
+// PhaseDisplayName возвращает русское название фазы.
+func (ts TaskState) PhaseDisplayName() string {
+	switch ts.Phase {
+	case PhasePlanning:
+		return "Планирование"
+	case PhaseExecution:
+		return "Выполнение"
+	case PhaseValidation:
+		return "Проверка"
+	case PhaseDone:
+		return "Завершено"
+	case PhasePaused:
+		paused := &TaskState{Phase: ts.PausedPhase}
+		return fmt.Sprintf("Пауза (было: %s)", paused.PhaseDisplayName())
+	default:
+		return "(не определена)"
+	}
+}
+
 // WorkingMemory — рабочая память (данные текущей задачи).
 type WorkingMemory struct {
-	Task        string   `json:"task"`        // текущая задача
-	Goals       []string `json:"goals"`       // цели задачи
-	Constraints []string `json:"constraints"` // ограничения
-	Progress    []string `json:"progress"`    // промежуточные результаты
+	Task        string    `json:"task"`        // текущая задача
+	Goals       []string  `json:"goals"`       // цели задачи
+	Constraints []string  `json:"constraints"` // ограничения
+	Progress    []string  `json:"progress"`    // промежуточные результаты
+	State       TaskState `json:"state"`       // конечный автомат задачи
 }
 
 // LongTermMemory — долговременная память (профиль, решения, знания).
@@ -128,6 +178,33 @@ func (m *MemoryLayers) BuildSystem(base string) string {
 				sb.WriteString(fmt.Sprintf("  - %s\n", p))
 			}
 		}
+
+		// Состояние конечного автомата задачи
+		if m.working.State.Phase != PhaseNone {
+			sb.WriteString("\n[СОСТОЯНИЕ ЗАДАЧИ — КОНЕЧНЫЙ АВТОМАТ]\n")
+			sb.WriteString(fmt.Sprintf("Фаза: %s\n", m.working.State.PhaseDisplayName()))
+
+			if m.working.State.IsPaused() {
+				sb.WriteString("ВНИМАНИЕ: Задача на паузе. Не продвигай задачу, пока пользователь не скажет «продолжить».\n")
+			}
+			if m.working.State.CurrentStep != "" {
+				sb.WriteString(fmt.Sprintf("Текущий шаг: %s\n", m.working.State.CurrentStep))
+			}
+			if m.working.State.ExpectedAction != "" {
+				sb.WriteString(fmt.Sprintf("Ожидаемое действие: %s\n", m.working.State.ExpectedAction))
+			}
+
+			switch m.working.State.Phase {
+			case PhasePlanning:
+				sb.WriteString("ИНСТРУКЦИЯ: Мы на этапе планирования. Помоги составить план, уточни цели и ограничения. Не начинай выполнение.\n")
+			case PhaseExecution:
+				sb.WriteString("ИНСТРУКЦИЯ: Мы на этапе выполнения. Помогай с конкретными шагами. Не повторяй план, если не просят.\n")
+			case PhaseValidation:
+				sb.WriteString("ИНСТРУКЦИЯ: Мы на этапе проверки. Помоги проверить результат, найти ошибки, предложить улучшения.\n")
+			case PhaseDone:
+				sb.WriteString("ИНСТРУКЦИЯ: Задача завершена. Готов к новой задаче.\n")
+			}
+		}
 	}
 
 	return sb.String()
@@ -182,6 +259,15 @@ func (m *MemoryLayers) PostProcess(llmCall func(string, []Message, int) (string,
 	} else {
 		sb.WriteString("Задача: (не определена)\n")
 	}
+	if m.working.State.Phase != PhaseNone {
+		sb.WriteString(fmt.Sprintf("Фаза: %s\n", m.working.State.Phase))
+		if m.working.State.CurrentStep != "" {
+			sb.WriteString(fmt.Sprintf("Текущий шаг: %s\n", m.working.State.CurrentStep))
+		}
+		if m.working.State.ExpectedAction != "" {
+			sb.WriteString(fmt.Sprintf("Ожидаемое действие: %s\n", m.working.State.ExpectedAction))
+		}
+	}
 
 	sb.WriteString("\n--- Текущая долговременная память ---\n")
 	if len(m.longTerm.Profile) > 0 {
@@ -200,7 +286,10 @@ func (m *MemoryLayers) PostProcess(llmCall func(string, []Message, int) (string,
     "task": "описание текущей задачи или пустая строка если не изменилась",
     "goals": ["новые цели, если появились"],
     "constraints": ["новые ограничения, если появились"],
-    "progress": ["новые промежуточные результаты, если есть"]
+    "progress": ["новые промежуточные результаты, если есть"],
+    "suggest_phase": "предлагаемая фаза или пустая строка",
+    "current_step": "текущий шаг внутри фазы или пустая строка",
+    "expected_action": "что ожидается дальше или пустая строка"
   },
   "long_term": {
     "profile": {"ключ": "значение — новые факты о пользователе"},
@@ -211,10 +300,19 @@ func (m *MemoryLayers) PostProcess(llmCall func(string, []Message, int) (string,
 }
 
 Правила:
-- Если новой информации для слоя нет — оставь пустые массивы/объекты
+- Если новой информации для слоя нет — оставь пустые массивы/объекты/строки
 - В working помещай только то, что относится к ТЕКУЩЕЙ задаче
 - В long_term помещай стабильные факты, которые пригодятся в будущих диалогах
-- Не дублируй то, что уже есть в памяти`
+- Не дублируй то, что уже есть в памяти
+
+Управление фазами задачи (suggest_phase):
+- planning — пользователь обсуждает что нужно сделать, формулирует план
+- execution — пользователь выполняет конкретные шаги, пишет код, делает действия
+- validation — пользователь проверяет результат, тестирует, ревьюит
+- done — задача завершена, результат получен
+- Оставь пустую строку, если фаза не изменилась
+- При первом появлении задачи предлагай "planning"
+- Переход в "done" только когда пользователь явно подтвердил завершение`
 
 	result, err := llmCall(system, []Message{{Role: "user", Content: sb.String()}}, 500)
 	if err != nil {
@@ -227,10 +325,13 @@ func (m *MemoryLayers) PostProcess(llmCall func(string, []Message, int) (string,
 // memoryUpdate — структура ответа от LLM-менеджера памяти.
 type memoryUpdate struct {
 	Working struct {
-		Task        string   `json:"task"`
-		Goals       []string `json:"goals"`
-		Constraints []string `json:"constraints"`
-		Progress    []string `json:"progress"`
+		Task           string   `json:"task"`
+		Goals          []string `json:"goals"`
+		Constraints    []string `json:"constraints"`
+		Progress       []string `json:"progress"`
+		SuggestPhase   string   `json:"suggest_phase"`
+		CurrentStep    string   `json:"current_step"`
+		ExpectedAction string   `json:"expected_action"`
 	} `json:"working"`
 	LongTerm struct {
 		Profile   map[string]string `json:"profile"`
@@ -262,6 +363,26 @@ func (m *MemoryLayers) applyMemoryUpdate(raw string) {
 	m.working.Goals = appendUnique(m.working.Goals, update.Working.Goals)
 	m.working.Constraints = appendUnique(m.working.Constraints, update.Working.Constraints)
 	m.working.Progress = append(m.working.Progress, update.Working.Progress...)
+
+	// Обновляем состояние автомата задачи
+	if update.Working.CurrentStep != "" {
+		m.working.State.CurrentStep = update.Working.CurrentStep
+	}
+	if update.Working.ExpectedAction != "" {
+		m.working.State.ExpectedAction = update.Working.ExpectedAction
+	}
+	// Авто-инициализация: если задача задана, а фаза пуста — начинаем с планирования
+	if m.working.Task != "" && m.working.State.Phase == PhaseNone {
+		m.working.State.Phase = PhasePlanning
+	}
+	// Применяем предложенную фазу (только если переход допустим)
+	if update.Working.SuggestPhase != "" {
+		target := TaskPhase(update.Working.SuggestPhase)
+		if CanTransition(m.working.State.Phase, target) {
+			m.working.State.Phase = target
+			m.working.State.PausedPhase = ""
+		}
+	}
 
 	// Обновляем долговременную память
 	if m.longTerm.Profile == nil {
@@ -303,8 +424,12 @@ func (m *MemoryLayers) Info() string {
 
 	sb.WriteString("  Рабочая: ")
 	if m.working.Task != "" {
-		sb.WriteString(fmt.Sprintf("задача=%q, %d целей, %d шагов\n",
+		sb.WriteString(fmt.Sprintf("задача=%q, %d целей, %d шагов",
 			m.working.Task, len(m.working.Goals), len(m.working.Progress)))
+		if m.working.State.Phase != PhaseNone {
+			sb.WriteString(fmt.Sprintf(", фаза=%s", m.working.State.PhaseDisplayName()))
+		}
+		sb.WriteString("\n")
 	} else {
 		sb.WriteString("(пусто)\n")
 	}
@@ -319,6 +444,91 @@ func (m *MemoryLayers) Info() string {
 
 func (m *MemoryLayers) HistoryLen() int {
 	return len(m.shortTerm)
+}
+
+// --- Конечный автомат задачи ---
+
+// validTransitions определяет допустимые переходы между фазами.
+var validTransitions = map[TaskPhase][]TaskPhase{
+	PhaseNone:       {PhasePlanning},
+	PhasePlanning:   {PhaseExecution, PhasePaused},
+	PhaseExecution:  {PhaseValidation, PhasePlanning, PhasePaused},
+	PhaseValidation: {PhaseDone, PhaseExecution, PhasePaused},
+	PhaseDone:       {PhasePlanning},
+}
+
+// CanTransition проверяет, допустим ли переход из from в to.
+func CanTransition(from, to TaskPhase) bool {
+	for _, a := range validTransitions[from] {
+		if a == to {
+			return true
+		}
+	}
+	return false
+}
+
+func nextLinearPhase(p TaskPhase) TaskPhase {
+	switch p {
+	case PhaseNone:
+		return PhasePlanning
+	case PhasePlanning:
+		return PhaseExecution
+	case PhaseExecution:
+		return PhaseValidation
+	case PhaseValidation:
+		return PhaseDone
+	default:
+		return PhaseNone
+	}
+}
+
+// AdvancePhase переводит задачу в следующую фазу по линейной цепочке.
+func (m *MemoryLayers) AdvancePhase() error {
+	next := nextLinearPhase(m.working.State.Phase)
+	if next == PhaseNone {
+		return fmt.Errorf("невозможно продвинуть фазу из %q", m.working.State.Phase)
+	}
+	m.working.State.Phase = next
+	m.working.State.PausedPhase = ""
+	m.working.State.CurrentStep = ""
+	m.working.State.ExpectedAction = ""
+	return nil
+}
+
+// SetPhase устанавливает фазу вручную (с проверкой допустимости перехода).
+func (m *MemoryLayers) SetPhase(target TaskPhase) error {
+	if !CanTransition(m.working.State.Phase, target) {
+		return fmt.Errorf("переход %q → %q не разрешён", m.working.State.Phase, target)
+	}
+	m.working.State.Phase = target
+	m.working.State.PausedPhase = ""
+	return nil
+}
+
+// PauseTask ставит задачу на паузу, сохраняя текущую фазу.
+func (m *MemoryLayers) PauseTask() error {
+	p := m.working.State.Phase
+	if p == PhaseNone || p == PhaseDone || p == PhasePaused {
+		return fmt.Errorf("невозможно поставить на паузу в фазе %q", p)
+	}
+	m.working.State.PausedPhase = p
+	m.working.State.Phase = PhasePaused
+	return nil
+}
+
+// ResumeTask возобновляет задачу после паузы.
+func (m *MemoryLayers) ResumeTask() error {
+	if m.working.State.Phase != PhasePaused {
+		return fmt.Errorf("задача не на паузе (текущая фаза: %q)", m.working.State.Phase)
+	}
+	m.working.State.Phase = m.working.State.PausedPhase
+	m.working.State.PausedPhase = ""
+	return nil
+}
+
+// GetTaskState возвращает текущее состояние автомата.
+func (m *MemoryLayers) GetTaskState() TaskState {
+	return m.working.State
 }
 
 // --- Управление профилем ---
