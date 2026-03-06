@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"ai_training/agent"
@@ -24,7 +25,7 @@ func main() {
 		"1": agent.NewSlidingWindow(6),
 		"2": agent.NewStickyFacts(6),
 		"3": agent.NewBranching(),
-		"4": agent.NewMemoryLayers(6, "long_term_memory.json", "user_profile.json"),
+		"4": agent.NewMemoryLayers(6, "long_term_memory.json", "user_profile.json", "invariants.json"),
 	}
 
 	// По умолчанию — Memory Layers
@@ -173,6 +174,13 @@ func main() {
 					fmt.Printf("[Задача возобновлена: %s]\n", ts.PhaseDisplayName())
 				}
 				continue
+			case "инварианты":
+				printInvariants(mem)
+				continue
+			case "сброс инвариантов":
+				mem.ResetInvariants()
+				fmt.Println("[Инварианты очищены]")
+				continue
 			}
 
 			// Применение пресета: "пресет новичок"
@@ -220,6 +228,36 @@ func main() {
 				p.Expertise = val
 				mem.SetProfile(p)
 				fmt.Printf("[Уровень: %s]\n", val)
+				continue
+			}
+
+			// Добавление инвариантов: "+ арх ...", "+ стек ...", "+ бизнес ..."
+			if rule, ok := strings.CutPrefix(cmd, "+ арх "); ok {
+				mem.AddInvariant(rule, "arch")
+				fmt.Printf("[Инвариант: Архитектура → %s]\n", rule)
+				continue
+			}
+			if rule, ok := strings.CutPrefix(cmd, "+ стек "); ok {
+				mem.AddInvariant(rule, "stack")
+				fmt.Printf("[Инвариант: Технический стек → %s]\n", rule)
+				continue
+			}
+			if rule, ok := strings.CutPrefix(cmd, "+ бизнес "); ok {
+				mem.AddInvariant(rule, "business")
+				fmt.Printf("[Инвариант: Бизнес-правила → %s]\n", rule)
+				continue
+			}
+
+			// Удаление инварианта: "- инвариант 1"
+			if val, ok := strings.CutPrefix(cmd, "- инвариант "); ok {
+				idx, err := strconv.Atoi(val)
+				if err != nil {
+					fmt.Println("[Укажите номер инварианта]")
+				} else if err := mem.RemoveInvariant(idx); err != nil {
+					fmt.Printf("[Ошибка: %v]\n", err)
+				} else {
+					fmt.Printf("[Инвариант #%d удалён]\n", idx)
+				}
 				continue
 			}
 
@@ -307,6 +345,14 @@ func printHelp(a *agent.Agent) {
 	fmt.Println("  формат <знач>  — brief / detailed / structured")
 	fmt.Println("  уровень <знач> — beginner / intermediate / expert")
 	fmt.Println("  сброс профиля  — очистить профиль")
+	fmt.Println()
+	fmt.Println("Инварианты (неизменяемые правила):")
+	fmt.Println("  инварианты         — показать все инварианты")
+	fmt.Println("  + арх <правило>    — архитектурный инвариант")
+	fmt.Println("  + стек <правило>   — ограничение стека")
+	fmt.Println("  + бизнес <правило> — бизнес-правило")
+	fmt.Println("  - инвариант <номер>— удалить инвариант")
+	fmt.Println("  сброс инвариантов  — очистить все")
 	fmt.Println(strings.Repeat("=", 60))
 }
 
@@ -506,5 +552,22 @@ func printPresets() {
 	for name, p := range presets {
 		fmt.Printf("\n  [%s]\n", name)
 		fmt.Print(p.Display())
+	}
+}
+
+// --- Функции инвариантов ---
+
+func printInvariants(mem *agent.MemoryLayers) {
+	invs := mem.GetInvariants()
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println("  ИНВАРИАНТЫ (неизменяемые правила)")
+	fmt.Println(strings.Repeat("-", 50))
+	if len(invs) == 0 {
+		fmt.Println("  (нет инвариантов)")
+		return
+	}
+	for i, inv := range invs {
+		fmt.Printf("  %d. [%s] %s\n", i+1, inv.CategoryDisplayName(), inv.Rule)
 	}
 }

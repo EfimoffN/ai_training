@@ -88,6 +88,26 @@ type LongTermMemory struct {
 	UpdatedAt string            `json:"updated_at"` // время обновления
 }
 
+// Invariant — неизменяемое правило, которое ассистент не имеет права нарушать.
+type Invariant struct {
+	Rule     string `json:"rule"`     // текст правила
+	Category string `json:"category"` // arch / stack / business / other
+}
+
+// CategoryDisplayName возвращает русское название категории.
+func (inv Invariant) CategoryDisplayName() string {
+	switch inv.Category {
+	case "arch":
+		return "Архитектура"
+	case "stack":
+		return "Технический стек"
+	case "business":
+		return "Бизнес-правила"
+	default:
+		return "Прочее"
+	}
+}
+
 // MemoryLayers — стратегия с тремя явными слоями памяти.
 type MemoryLayers struct {
 	maxShortTerm int
@@ -100,6 +120,9 @@ type MemoryLayers struct {
 	profile     UserProfile // персонализация пользователя
 	profilePath string      // путь к файлу профиля
 
+	invariants     []Invariant // инварианты — жёсткие правила
+	invariantsPath string      // путь к файлу инвариантов
+
 	storagePath string // путь к файлу долговременной памяти
 	lastSaved   string // контрольная сумма для предотвращения лишних сохранений
 }
@@ -108,17 +131,20 @@ type MemoryLayers struct {
 // maxShortTerm — сколько последних сообщений хранить в краткосрочной памяти.
 // storagePath — путь к JSON-файлу для долговременной памяти (пустая строка = без персистенции).
 // profilePath — путь к JSON-файлу профиля пользователя.
-func NewMemoryLayers(maxShortTerm int, storagePath, profilePath string) *MemoryLayers {
+// invariantsPath — путь к JSON-файлу инвариантов.
+func NewMemoryLayers(maxShortTerm int, storagePath, profilePath, invariantsPath string) *MemoryLayers {
 	m := &MemoryLayers{
-		maxShortTerm: maxShortTerm,
-		storagePath:  storagePath,
-		profilePath:  profilePath,
+		maxShortTerm:   maxShortTerm,
+		storagePath:    storagePath,
+		profilePath:    profilePath,
+		invariantsPath: invariantsPath,
 		longTerm: LongTermMemory{
 			Profile: make(map[string]string),
 		},
 	}
 	m.loadLongTerm()
 	m.loadProfile()
+	m.loadInvariants()
 	return m
 }
 
@@ -129,7 +155,30 @@ func (m *MemoryLayers) BuildSystem(base string) string {
 	var sb strings.Builder
 	sb.WriteString(base)
 
-	// Персонализация — профиль пользователя (самый приоритетный блок)
+	// Инварианты — неизменяемые правила (наивысший приоритет)
+	if len(m.invariants) > 0 {
+		sb.WriteString("\n\n[ИНВАРИАНТЫ — НЕИЗМЕНЯЕМЫЕ ПРАВИЛА]\n")
+		sb.WriteString("Эти правила НЕЛЬЗЯ нарушать ни при каких обстоятельствах.\n")
+		sb.WriteString("Если запрос пользователя противоречит инварианту — ОТКАЖИСЬ и объясни, какой именно инвариант нарушается и почему.\n")
+
+		grouped := map[string][]string{}
+		for _, inv := range m.invariants {
+			grouped[inv.Category] = append(grouped[inv.Category], inv.Rule)
+		}
+		for _, cat := range []string{"arch", "stack", "business", "other"} {
+			rules := grouped[cat]
+			if len(rules) == 0 {
+				continue
+			}
+			name := Invariant{Category: cat}.CategoryDisplayName()
+			fmt.Fprintf(&sb, "\n%s:\n", name)
+			for _, r := range rules {
+				fmt.Fprintf(&sb, "  * %s\n", r)
+			}
+		}
+	}
+
+	// Персонализация — профиль пользователя
 	if block := m.profile.BuildPromptBlock(); block != "" {
 		sb.WriteString(block)
 	}
@@ -269,6 +318,14 @@ func (m *MemoryLayers) PostProcess(llmCall func(string, []Message, int) (string,
 		}
 	}
 
+	// Инварианты для контекста
+	if len(m.invariants) > 0 {
+		sb.WriteString("\n--- Текущие инварианты ---\n")
+		for _, inv := range m.invariants {
+			fmt.Fprintf(&sb, "- [%s] %s\n", inv.Category, inv.Rule)
+		}
+	}
+
 	sb.WriteString("\n--- Текущая долговременная память ---\n")
 	if len(m.longTerm.Profile) > 0 {
 		sb.WriteString("Профиль: ")
@@ -296,6 +353,7 @@ func (m *MemoryLayers) PostProcess(llmCall func(string, []Message, int) (string,
     "decisions": ["новые решения, если приняты"],
     "knowledge": ["новые важные знания, если появились"]
   },
+  "invariant_conflict": "описание конфликта с инвариантом или пустая строка",
   "reasoning": "краткое пояснение, почему именно эти данные и в эти слои"
 }
 
@@ -312,7 +370,11 @@ func (m *MemoryLayers) PostProcess(llmCall func(string, []Message, int) (string,
 - done — задача завершена, результат получен
 - Оставь пустую строку, если фаза не изменилась
 - При первом появлении задачи предлагай "planning"
-- Переход в "done" только когда пользователь явно подтвердил завершение`
+- Переход в "done" только когда пользователь явно подтвердил завершение
+
+Проверка инвариантов:
+- Если в ответе ассистента есть конфликт с инвариантом — опиши в invariant_conflict
+- Если конфликта нет — оставь пустую строку`
 
 	result, err := llmCall(system, []Message{{Role: "user", Content: sb.String()}}, 500)
 	if err != nil {
@@ -338,7 +400,8 @@ type memoryUpdate struct {
 		Decisions []string          `json:"decisions"`
 		Knowledge []string          `json:"knowledge"`
 	} `json:"long_term"`
-	Reasoning string `json:"reasoning"`
+	InvariantConflict string `json:"invariant_conflict"`
+	Reasoning         string `json:"reasoning"`
 }
 
 func (m *MemoryLayers) applyMemoryUpdate(raw string) {
@@ -382,6 +445,12 @@ func (m *MemoryLayers) applyMemoryUpdate(raw string) {
 			m.working.State.Phase = target
 			m.working.State.PausedPhase = ""
 		}
+	}
+
+	// Фиксируем конфликт с инвариантом
+	if update.InvariantConflict != "" {
+		m.working.Progress = append(m.working.Progress,
+			fmt.Sprintf("[КОНФЛИКТ ИНВАРИАНТА] %s", update.InvariantConflict))
 	}
 
 	// Обновляем долговременную память
@@ -434,6 +503,9 @@ func (m *MemoryLayers) Info() string {
 		sb.WriteString("(пусто)\n")
 	}
 
+	if len(m.invariants) > 0 {
+		fmt.Fprintf(&sb, "  Инварианты: %d правил\n", len(m.invariants))
+	}
 	sb.WriteString(fmt.Sprintf("  Долговременная: %d в профиле, %d решений, %d знаний",
 		len(m.longTerm.Profile), len(m.longTerm.Decisions), len(m.longTerm.Knowledge)))
 	if m.longTerm.UpdatedAt != "" {
@@ -564,6 +636,61 @@ func (m *MemoryLayers) loadProfile() {
 	if p, err := LoadProfile(m.profilePath); err == nil {
 		m.profile = *p
 	}
+}
+
+// --- Управление инвариантами ---
+
+// AddInvariant добавляет инвариант.
+func (m *MemoryLayers) AddInvariant(rule, category string) {
+	m.invariants = append(m.invariants, Invariant{Rule: rule, Category: category})
+	m.saveInvariants()
+}
+
+// RemoveInvariant удаляет инвариант по индексу (1-based).
+func (m *MemoryLayers) RemoveInvariant(index int) error {
+	if index < 1 || index > len(m.invariants) {
+		return fmt.Errorf("неверный номер: %d (всего %d)", index, len(m.invariants))
+	}
+	m.invariants = append(m.invariants[:index-1], m.invariants[index:]...)
+	m.saveInvariants()
+	return nil
+}
+
+// GetInvariants возвращает список инвариантов.
+func (m *MemoryLayers) GetInvariants() []Invariant {
+	return m.invariants
+}
+
+// ResetInvariants очищает все инварианты.
+func (m *MemoryLayers) ResetInvariants() {
+	m.invariants = nil
+	m.saveInvariants()
+}
+
+func (m *MemoryLayers) saveInvariants() {
+	if m.invariantsPath == "" {
+		return
+	}
+	data, err := json.MarshalIndent(m.invariants, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(m.invariantsPath, data, 0644)
+}
+
+func (m *MemoryLayers) loadInvariants() {
+	if m.invariantsPath == "" {
+		return
+	}
+	data, err := os.ReadFile(m.invariantsPath)
+	if err != nil {
+		return
+	}
+	var inv []Invariant
+	if err := json.Unmarshal(data, &inv); err != nil {
+		return
+	}
+	m.invariants = inv
 }
 
 // --- Доступ к слоям для отображения в main ---
