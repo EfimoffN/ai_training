@@ -71,6 +71,15 @@ func (ts TaskState) PhaseDisplayName() string {
 	}
 }
 
+// TransitionRecord — запись о попытке перехода между фазами.
+type TransitionRecord struct {
+	From    TaskPhase `json:"from"`    // исходная фаза
+	To      TaskPhase `json:"to"`      // целевая фаза
+	Allowed bool      `json:"allowed"` // был ли переход разрешён
+	Reason  string    `json:"reason"`  // причина разрешения/отказа
+	Source  string    `json:"source"`  // кто инициировал: "user", "llm", "auto"
+}
+
 // WorkingMemory — рабочая память (данные текущей задачи).
 type WorkingMemory struct {
 	Task        string    `json:"task"`        // текущая задача
@@ -78,6 +87,7 @@ type WorkingMemory struct {
 	Constraints []string  `json:"constraints"` // ограничения
 	Progress    []string  `json:"progress"`    // промежуточные результаты
 	State       TaskState `json:"state"`       // конечный автомат задачи
+	Transitions []TransitionRecord `json:"transitions"` // лог переходов
 }
 
 // LongTermMemory — долговременная память (профиль, решения, знания).
@@ -252,6 +262,35 @@ func (m *MemoryLayers) BuildSystem(base string) string {
 				sb.WriteString("ИНСТРУКЦИЯ: Мы на этапе проверки. Помоги проверить результат, найти ошибки, предложить улучшения.\n")
 			case PhaseDone:
 				sb.WriteString("ИНСТРУКЦИЯ: Задача завершена. Готов к новой задаче.\n")
+			}
+
+			// Явные правила переходов для LLM
+			sb.WriteString("\n[ПРАВИЛА ПЕРЕХОДОВ — СТРОГО ОБЯЗАТЕЛЬНЫ]\n")
+			sb.WriteString("Жизненный цикл задачи: планирование → выполнение → проверка → завершено\n")
+			sb.WriteString("ЗАПРЕЩЕНО перепрыгивать этапы:\n")
+			sb.WriteString("  * Нельзя переходить к выполнению, пока план не утверждён (нет целей)\n")
+			sb.WriteString("  * Нельзя переходить к проверке, пока нет промежуточных результатов\n")
+			sb.WriteString("  * Нельзя завершать задачу без прохождения этапа проверки\n")
+			sb.WriteString("Если пользователь просит перепрыгнуть этап — объясни, что сначала нужно пройти предыдущий.\n")
+
+			// Показываем допустимые переходы из текущей фазы
+			allowed := m.AllowedTransitions()
+			if len(allowed) > 0 {
+				sb.WriteString("Допустимые переходы из текущей фазы: ")
+				names := make([]string, len(allowed))
+				for i, a := range allowed {
+					names[i] = string(a)
+				}
+				sb.WriteString(strings.Join(names, ", "))
+				sb.WriteString("\n")
+			}
+			// Показываем заблокированные переходы (есть в графе, но предусловия не выполнены)
+			blocked := m.blockedTransitions()
+			if len(blocked) > 0 {
+				sb.WriteString("Заблокированные переходы (не выполнены предусловия):\n")
+				for _, b := range blocked {
+					sb.WriteString(fmt.Sprintf("  * %s: %s\n", b.phase, b.reason))
+				}
 			}
 		}
 	}
@@ -436,14 +475,16 @@ func (m *MemoryLayers) applyMemoryUpdate(raw string) {
 	}
 	// Авто-инициализация: если задача задана, а фаза пуста — начинаем с планирования
 	if m.working.Task != "" && m.working.State.Phase == PhaseNone {
+		m.logTransition(PhaseNone, PhasePlanning, true, "авто-инициализация при задании задачи", "auto")
 		m.working.State.Phase = PhasePlanning
 	}
-	// Применяем предложенную фазу (только если переход допустим)
+	// Применяем предложенную фазу (через tryTransition с полной проверкой)
 	if update.Working.SuggestPhase != "" {
 		target := TaskPhase(update.Working.SuggestPhase)
-		if CanTransition(m.working.State.Phase, target) {
-			m.working.State.Phase = target
-			m.working.State.PausedPhase = ""
+		if err := m.tryTransition(target, "llm"); err != nil {
+			// Отклонённый переход уже записан в лог через tryTransition
+			m.working.Progress = append(m.working.Progress,
+				fmt.Sprintf("[ПЕРЕХОД ОТКЛОНЁН] LLM предложил %s → %s: %s", m.working.State.Phase, target, err.Error()))
 		}
 	}
 
@@ -554,14 +595,113 @@ func nextLinearPhase(p TaskPhase) TaskPhase {
 	}
 }
 
+// phasePreconditions проверяет предусловия для входа в целевую фазу.
+// Возвращает пустую строку, если предусловия выполнены, или описание проблемы.
+func (m *MemoryLayers) phasePreconditions(target TaskPhase) string {
+	switch target {
+	case PhaseExecution:
+		// Нельзя начинать выполнение без задачи и целей (план не утверждён)
+		if m.working.Task == "" {
+			return "нельзя начать выполнение: задача не определена"
+		}
+		if len(m.working.Goals) == 0 {
+			return "нельзя начать выполнение: план не утверждён (нет целей)"
+		}
+	case PhaseValidation:
+		// Нельзя проверять, если нет прогресса (ничего не выполнено)
+		if len(m.working.Progress) == 0 {
+			return "нельзя начать проверку: нет промежуточных результатов (этап выполнения не пройден)"
+		}
+	case PhaseDone:
+		// Нельзя завершить без прохождения валидации
+		if m.working.State.Phase != PhaseValidation {
+			return "нельзя завершить задачу: необходимо пройти этап проверки"
+		}
+	}
+	return ""
+}
+
+// tryTransition пытается выполнить переход и записывает результат в лог.
+// source: "user" / "llm" / "auto"
+func (m *MemoryLayers) tryTransition(target TaskPhase, source string) error {
+	from := m.working.State.Phase
+
+	// Проверяем допустимость перехода по графу
+	if !CanTransition(from, target) {
+		reason := fmt.Sprintf("переход %s → %s не разрешён графом переходов", from, target)
+		m.logTransition(from, target, false, reason, source)
+		return fmt.Errorf(reason)
+	}
+
+	// Проверяем предусловия целевой фазы
+	if pre := m.phasePreconditions(target); pre != "" {
+		m.logTransition(from, target, false, pre, source)
+		return fmt.Errorf(pre)
+	}
+
+	// Переход разрешён
+	m.logTransition(from, target, true, "ок", source)
+	m.working.State.Phase = target
+	m.working.State.PausedPhase = ""
+	return nil
+}
+
+func (m *MemoryLayers) logTransition(from, to TaskPhase, allowed bool, reason, source string) {
+	m.working.Transitions = append(m.working.Transitions, TransitionRecord{
+		From:    from,
+		To:      to,
+		Allowed: allowed,
+		Reason:  reason,
+		Source:  source,
+	})
+}
+
+// AllowedTransitions возвращает список допустимых переходов из текущей фазы
+// с учётом предусловий.
+func (m *MemoryLayers) AllowedTransitions() []TaskPhase {
+	current := m.working.State.Phase
+	candidates := validTransitions[current]
+	var allowed []TaskPhase
+	for _, t := range candidates {
+		if m.phasePreconditions(t) == "" {
+			allowed = append(allowed, t)
+		}
+	}
+	return allowed
+}
+
+type blockedTransition struct {
+	phase  TaskPhase
+	reason string
+}
+
+// blockedTransitions возвращает переходы, которые есть в графе, но заблокированы предусловиями.
+func (m *MemoryLayers) blockedTransitions() []blockedTransition {
+	current := m.working.State.Phase
+	candidates := validTransitions[current]
+	var blocked []blockedTransition
+	for _, t := range candidates {
+		if reason := m.phasePreconditions(t); reason != "" {
+			blocked = append(blocked, blockedTransition{phase: t, reason: reason})
+		}
+	}
+	return blocked
+}
+
+// GetTransitions возвращает лог переходов.
+func (m *MemoryLayers) GetTransitions() []TransitionRecord {
+	return m.working.Transitions
+}
+
 // AdvancePhase переводит задачу в следующую фазу по линейной цепочке.
 func (m *MemoryLayers) AdvancePhase() error {
 	next := nextLinearPhase(m.working.State.Phase)
 	if next == PhaseNone {
 		return fmt.Errorf("невозможно продвинуть фазу из %q", m.working.State.Phase)
 	}
-	m.working.State.Phase = next
-	m.working.State.PausedPhase = ""
+	if err := m.tryTransition(next, "user"); err != nil {
+		return err
+	}
 	m.working.State.CurrentStep = ""
 	m.working.State.ExpectedAction = ""
 	return nil
@@ -569,12 +709,7 @@ func (m *MemoryLayers) AdvancePhase() error {
 
 // SetPhase устанавливает фазу вручную (с проверкой допустимости перехода).
 func (m *MemoryLayers) SetPhase(target TaskPhase) error {
-	if !CanTransition(m.working.State.Phase, target) {
-		return fmt.Errorf("переход %q → %q не разрешён", m.working.State.Phase, target)
-	}
-	m.working.State.Phase = target
-	m.working.State.PausedPhase = ""
-	return nil
+	return m.tryTransition(target, "user")
 }
 
 // PauseTask ставит задачу на паузу, сохраняя текущую фазу.

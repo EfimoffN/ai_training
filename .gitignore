@@ -1,2 +1,4 @@
 .env
+.claude
 history.json
+settings.json

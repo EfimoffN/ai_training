@@ -174,6 +174,9 @@ func main() {
 					fmt.Printf("[Задача возобновлена: %s]\n", ts.PhaseDisplayName())
 				}
 				continue
+			case "переходы":
+				printTransitions(mem)
+				continue
 			case "инварианты":
 				printInvariants(mem)
 				continue
@@ -335,6 +338,7 @@ func printHelp(a *agent.Agent) {
 	fmt.Println("  продолжить   — возобновить задачу")
 	fmt.Println("  фаза <имя>   — установить фазу вручную")
 	fmt.Println("                 (планирование/выполнение/проверка/завершено)")
+	fmt.Println("  переходы     — лог всех переходов (успешных и отклонённых)")
 	fmt.Println()
 	fmt.Println("Персонализация:")
 	fmt.Println("  профиль        — текущий профиль")
@@ -486,6 +490,20 @@ func printTaskState(mem *agent.MemoryLayers) {
 	if ts.ExpectedAction != "" {
 		fmt.Printf("  Далее:  %s\n", ts.ExpectedAction)
 	}
+
+	// Допустимые переходы с учётом предусловий
+	allowed := mem.AllowedTransitions()
+	if len(allowed) > 0 {
+		fmt.Print("  Доступные переходы: ")
+		names := make([]string, len(allowed))
+		for i, a := range allowed {
+			names[i] = (&agent.TaskState{Phase: a}).PhaseDisplayName()
+		}
+		fmt.Println(strings.Join(names, ", "))
+	} else if !ts.IsPaused() {
+		fmt.Println("  Доступные переходы: (нет)")
+	}
+
 	fmt.Println()
 	if ts.IsPaused() {
 		fmt.Println("  Доступные команды:")
@@ -495,6 +513,27 @@ func printTaskState(mem *agent.MemoryLayers) {
 		fmt.Println("    далее      — следующая фаза")
 		fmt.Println("    пауза      — приостановить")
 		fmt.Println("    фаза <имя> — установить вручную")
+		fmt.Println("    переходы   — лог всех переходов")
+	}
+}
+
+func printTransitions(mem *agent.MemoryLayers) {
+	transitions := mem.GetTransitions()
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println("  ЛОГ ПЕРЕХОДОВ")
+	fmt.Println(strings.Repeat("-", 50))
+	if len(transitions) == 0 {
+		fmt.Println("  (переходов не было)")
+		return
+	}
+	for i, t := range transitions {
+		status := "✓"
+		if !t.Allowed {
+			status = "✗"
+		}
+		fmt.Printf("  %d. %s %s → %s [%s] %s\n",
+			i+1, status, t.From, t.To, t.Source, t.Reason)
 	}
 }
 
